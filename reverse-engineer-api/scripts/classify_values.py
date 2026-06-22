@@ -163,6 +163,12 @@ def is_high_entropy(val: object) -> bool:
     return shannon_bits(s) >= MIN_SHANNON_BITS
 
 
+def _is_trivial(val: object) -> bool:
+    # too low-cardinality to anchor a DERIVED edge without coincidence (booleans, single chars, sentinels).
+    s = str(val).strip().lower()
+    return s in LOW_CARD_LITERALS or len(s) < 2
+
+
 def canon(val: object) -> str:
     # canonical form for cross-run equality (DESIGN GEN-3): order-independent for dict/list.
     return json.dumps(val, sort_keys=True, separators=(",", ":"))
@@ -330,14 +336,15 @@ def transitive_subset(run: Run, golden_seqs: list[int]) -> list[int]:
     changed = True
     while changed:
         changed = False
-        # the pool of high-entropy values each earlier response could supply
+        # the pool of non-trivial values each earlier response could supply (NOT entropy-gated — a short id
+        # like jobId=42 must still pull in its producer; trivial literals are excluded to avoid over-pulling).
         for cons_seq in sorted(in_r):
-            needs = [v for _, v in request_carriers(run.rows[cons_seq]) if is_high_entropy(v)]
+            needs = [v for _, v in request_carriers(run.rows[cons_seq]) if not _is_trivial(v)]
             need_canon = {canon(v) for v in needs}
             for src_seq in range(cons_seq):
                 if src_seq in in_r:
                     continue
-                produced = {canon(v) for _, v in response_sources(run.rows[src_seq]) if is_high_entropy(v)}
+                produced = {canon(v) for _, v in response_sources(run.rows[src_seq]) if not _is_trivial(v)}
                 if need_canon & produced:
                     in_r.add(src_seq)
                     changed = True
@@ -377,11 +384,15 @@ class Classifier:
         return out
 
     def _source_in_responses(self, run: Run, r_seqs: list[int], up_to_rank: int, val: object) -> tuple[int, str] | None:
-        # find an EARLIER in-R response exposing this exact (high-entropy) value -> a DERIVED edge.
+        # find an EARLIER in-R response exposing this exact value -> a candidate DERIVED edge. NOT entropy-gated
+        # (a short id like jobId=42 is a real derived value); trivial low-cardinality literals are excluded to
+        # avoid coincidence, and the edge is confirmed by _derived_confirmed (holds every run) + co-variation.
+        if _is_trivial(val):
+            return None
         cval = canon(val)
         for rank in range(up_to_rank):
             for ext, sval in response_sources(run.rows[r_seqs[rank]]):
-                if canon(sval) == cval and is_high_entropy(sval):
+                if canon(sval) == cval:
                     return rank, ext
         return None
 
@@ -408,9 +419,14 @@ class Classifier:
             matches.append("INPUT")
             info["_input"] = {"ref": input_ref, "co_varies": True}
 
-        # DERIVED / PRODUCED — equals a unique high-entropy value in an earlier in-R response, co-varying.
+        # DERIVED / PRODUCED — equals a value in an earlier in-R response. High-entropy values are unique
+        # enough to thread on their own; a SHORT id is admitted only when it VARIES across the runs (a value
+        # constant across runs is CONST, not a derived edge) AND the edge holds in every run — that pair rules
+        # out a coincidental match. (Not _co_varies_with_input: that maps a value->declared-input ref, which a
+        # derived value has no entry in, so it is always False here.)
         src = self._source_in_responses(self.primary, self.r_seqs, rank, val)
-        if src and high_entropy and self._derived_confirmed(rank, extractor, src):
+        varies_across_runs = len({canon(v) for v in across if v is not None}) >= 2
+        if src and (high_entropy or varies_across_runs) and self._derived_confirmed(rank, extractor, src):
             src_rank, src_ext = src
             src_seq = self.r_seqs[src_rank]
             src_mut = is_mutation(self.primary.rows[src_seq])
@@ -556,27 +572,21 @@ def build_control_flow(run: Run, r_seqs: list[int], node_of_seq: dict[int, str])
     polls: list[JsonObj] = []
     repeats: list[JsonObj] = []
     retries: list[JsonObj] = []
-    # POLL: an in-R read repeated >=2x against the same locator with a body status field -> readiness gap.
-    locator_counts: Counter[str] = Counter()
+    # POLL: a non-mutating read repeated >=2x against one locator is an async gap. Gather its ordered
+    # responses and detect the readiness signal the UI waited for (status-code transition OR a settling
+    # status-like body field) — NOT a fixed field-name list.
+    rows_by_loc: dict[str, list[JsonObj]] = {}
+    first_seq: dict[str, int] = {}
     for seq in r_seqs:
-        locator_counts[_locator(run.rows[seq])] += 1
-    seen: set[str] = set()
-    for seq in r_seqs:
-        row = run.rows[seq]
-        loc = _locator(row)
-        if locator_counts[loc] >= 2 and not is_mutation(row) and loc not in seen:
-            status_path = _status_field(row)
-            if status_path:
-                # Read the ready value from the TERMINAL occurrence (COMPLETE), NOT the first (RUNNING) — else
-                # the generated poll is satisfied immediately and fetches the artifact prematurely.
-                terminal_row = _last_row_for_locator(run, r_seqs, loc)
-                polls.append({
-                    "read": node_of_seq[seq],
-                    "predicate": {"over": "body-field", "path": status_path,
-                                  "equals": _terminal_status(terminal_row, status_path),
-                                  "timeout_s": 60, "interval_s": 2},
-                })
-                seen.add(loc)
+        loc = _locator(run.rows[seq])
+        rows_by_loc.setdefault(loc, []).append(run.rows[seq])
+        first_seq.setdefault(loc, seq)
+    for loc, rows in rows_by_loc.items():
+        if len(rows) >= 2 and not is_mutation(rows[0]):
+            pred = _detect_readiness(rows)
+            if pred is not None:
+                polls.append({"read": node_of_seq[first_seq[loc]],
+                              "predicate": {**pred, "timeout_s": 60, "interval_s": 2}})
     # REPEAT: a response carrying a continuation signal (cursor/next/has_more) fed back -> pagination loop.
     for seq in r_seqs:
         cont = _continuation_signal(run.rows[seq])
@@ -591,48 +601,69 @@ def _locator(row: JsonObj) -> str:
     return f"{base}[{op}]" if op else base
 
 
-def _last_row_for_locator(run: Run, r_seqs: list[int], loc: str) -> JsonObj:
-    for seq in reversed(r_seqs):
-        if _locator(run.rows[seq]) == loc:
-            return run.rows[seq]
-    return run.rows[r_seqs[0]]
+_STATUS_NAME_RE = re.compile(r"(status|state|phase|stage|step|ready|done|complete|finish|progress)", re.I)
+_READY_CODES = (200, 201, 204)
 
 
-def _status_field(row: JsonObj) -> str | None:
-    body = row.get("respBody")
-    if isinstance(body, dict):
+def _detect_readiness(rows: list[JsonObj]) -> JsonObj | None:
+    # The readiness signal the UI waited for, recovered from the repeated reads — NOT a fixed field-name list:
+    #   1) STATUS-CODE / resource-presence: an earlier non-success becomes a success terminal (202->200, 404->200).
+    #   2) BODY FIELD: a field present in EVERY read that SETTLES to a terminal value — accepted when it is
+    #      status-NAMED (any read count) OR enum-like (distinct values < read count AND >=3 reads, so not a
+    #      per-read timestamp). The terminal value is the last read's value.
+    codes = [r.get("status") for r in rows]
+    if all(isinstance(c, int) for c in codes) and len(set(codes)) > 1 and codes[-1] in _READY_CODES:
+        return {"over": "status-code", "equals": codes[-1]}
+    per_row: list[dict[str, object]] = []
+    for r in rows:
+        body = r.get("respBody")
         leaves: list[tuple[str, object]] = []
-        _flatten(body, "", leaves)
-        for ptr, val in leaves:
-            if ptr.lower().endswith(("/status", "/state", "/phase")) and isinstance(val, str):
-                return f"json-ptr:{ptr}"
-    return None
+        if isinstance(body, dict):
+            _flatten(body, "", leaves)
+        per_row.append(dict(leaves))
+    common = set(per_row[0])
+    for d in per_row[1:]:
+        common &= set(d)
+    best: str | None = None
+    best_score = (-1, -1)
+    for ptr in common:
+        vals = [canon(d[ptr]) for d in per_row]
+        distinct = len(set(vals))
+        if distinct <= 1:  # constant -> not a readiness signal
+            continue
+        named = bool(_STATUS_NAME_RE.search(ptr.rsplit("/", 1)[-1]))
+        enum_like = distinct < len(vals) and len(vals) >= 3  # settles/repeats -> not a per-read timestamp
+        if not (named or enum_like):
+            continue
+        score = (1 if named else 0, 1 if isinstance(per_row[-1][ptr], str) else 0)
+        if score > best_score:
+            best_score, best = score, ptr
+    if best is None:
+        return None
+    return {"over": "body-field", "path": f"json-ptr:{best}", "equals": per_row[-1][best]}
 
 
-def _terminal_status(row: JsonObj, status_path: str) -> str:
-    ptr = status_path.split(":", 1)[1]
-    body = row.get("respBody")
-    leaves: list[tuple[str, object]] = []
-    if isinstance(body, dict):
-        _flatten(body, "", leaves)
-    for p, val in leaves:
-        if p == ptr:
-            return str(val)
-    return "COMPLETE"
+_CONT_HASMORE_RE = re.compile(r"(has_?more|has_?next_?page|more_?results|more_?available)\Z", re.I)
+_CONT_PRESENT_RE = re.compile(
+    r"(next_?cursor|next_?page_?token|next_?page|end_?cursor|start_?cursor|continuation_?token|continuation|next_?link|next)\Z",
+    re.I,
+)
 
 
 def _continuation_signal(row: JsonObj) -> JsonObj | None:
+    # a response carrying a "there is more" signal drives a REPEAT (pagination). Recognise the common names
+    # BROADLY (not a fixed 4-name list): a has_more / has_next boolean, or a present cursor / next-page token.
     body = row.get("respBody")
     if not isinstance(body, dict):
         return None
     leaves: list[tuple[str, object]] = []
     _flatten(body, "", leaves)
     for ptr, val in leaves:
-        low = ptr.lower()
-        if low.endswith(("/next_cursor", "/nextcursor", "/cursor", "/next")) and val not in (None, "", False):
-            return {"over": "body-field", "path": f"json-ptr:{ptr}", "present": True}
-        if low.endswith("/has_more") and val is True:
+        seg = ptr.rsplit("/", 1)[-1]
+        if _CONT_HASMORE_RE.search(seg) and val is True:
             return {"over": "body-field", "path": f"json-ptr:{ptr}", "equals": False}
+        if _CONT_PRESENT_RE.search(seg) and val not in (None, "", False, 0):
+            return {"over": "body-field", "path": f"json-ptr:{ptr}", "present": True}
     return None
 
 

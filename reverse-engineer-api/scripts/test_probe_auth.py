@@ -111,10 +111,12 @@ def test_build_js_refresh_object_threaded_for_case5() -> None:
 
 def test_build_js_preserves_bounded_probe_and_return_shape() -> None:
     js = p.build_js({"method": "GET", "url": "https://h/x", "headers": {}}, 200, "h", None)
-    # bounded <=6 probe and the working/case/recipe contract must survive the extend
-    assert "cands.slice(0, 6)" in js
+    # bounded probe (<=8 placements) and the working/case/recipe contract must survive the extend
+    assert "attempts >= 8" in js
     assert "working: true" in js and "working: false" in js
-    assert "case: cand.c" in js and "recipe: cand.recipe" in js
+    assert "case: cand.c" in js and "recipe: recipe" in js
+    # try the token under the OBSERVED auth header, not only Bearer
+    assert "obsAuthHeaders" in js
     # keep-UI fallback (case 3) intact
     assert "case: 3" in js
 

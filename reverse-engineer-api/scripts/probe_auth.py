@@ -22,7 +22,7 @@
 # signature header; reproduced verbatim re-using the same in-page signing context)  ·  5 = PRODUCED token
 # minted by a refresh call in R (mint, then Bearer)  ·  3 = no readable auth reproduced it -> keep the UI.
 #
-# SAFETY: it re-fires the request once per auth candidate (<=6). Failed-auth attempts are rejected by the
+# SAFETY: it re-fires the request once per auth-placement (<=8). Failed-auth attempts are rejected by the
 # server BEFORE the operation runs (no side effect); only the working auth executes it, once. Use only on
 # a read or a human-approved consequence-free write — the same gate run-in-page enforces.
 
@@ -72,18 +72,37 @@ PROBE_JS = r"""(async () => {
       if (mt) cands.push({recipe: "Bearer = token minted by refresh call (case 5, PRODUCED)", c: 5, v: mt});
     } catch (e) {}
   }
+  // Where does the app actually want auth? Try each readable token as Authorization:Bearer AND under the
+  // OBSERVED auth-header name(s) the captured request used (e.g. X-Api-Key) — Bearer-only was too strict, a
+  // custom-header token would otherwise read as "no readable auth -> keep UI".
+  const obsAuthHeaders = Object.keys(req.headers || {}).filter(h => {
+    const lh = h.toLowerCase(); return lh !== "cookie" && lh !== "authorization" && isAuth.test(h);
+  });
+  const placements = (v) => {
+    const out = [{h: "authorization", val: "Bearer " + v}];
+    for (const h of obsAuthHeaders) { out.push({h: h, val: v}); out.push({h: h, val: "Bearer " + v}); }
+    return out;
+  };
   const tried = [];
-  for (const cand of cands.slice(0, 6)) {
-    const headers = Object.assign({}, req.headers || {});
-    if (cand.v) headers["authorization"] = "Bearer " + cand.v;
-    try {
-      const r = await fetch(req.url, {method: req.method || "GET", credentials: "include", headers, body: req.body || undefined});
-      const text = await r.text();
-      tried.push({recipe: cand.recipe, status: r.status});
-      if (r.status === expect && !authFail.test(text)) {
-        return {working: true, case: cand.c, recipe: cand.recipe, status: r.status, tried};
-      }
-    } catch (e) { tried.push({recipe: cand.recipe, error: String(e)}); }
+  let attempts = 0;
+  for (const cand of cands) {
+    if (attempts >= 8) break;
+    const variants = cand.v ? placements(cand.v) : [{h: null, val: null}];
+    for (const pl of variants) {
+      if (attempts >= 8) break;
+      attempts++;
+      const headers = Object.assign({}, req.headers || {});
+      if (pl.h) headers[pl.h] = pl.val;
+      const recipe = cand.recipe + (pl.h && pl.h !== "authorization" ? " via header '" + pl.h + "'" : "");
+      try {
+        const r = await fetch(req.url, {method: req.method || "GET", credentials: "include", headers, body: req.body || undefined});
+        const text = await r.text();
+        tried.push({recipe: recipe, status: r.status});
+        if (r.status === expect && !authFail.test(text)) {
+          return {working: true, case: cand.c, recipe: recipe, status: r.status, tried};
+        }
+      } catch (e) { tried.push({recipe: recipe, error: String(e)}); }
+    }
   }
   return {working: false, case: 3, recipe: "no readable auth reproduced the request -> keep UI", tried};
 })()"""

@@ -17,7 +17,12 @@ from typing import Any
 
 JsonObj = dict[str, Any]  # a heterogeneous JSON-shaped record (paired row)
 
-SIGNING_KEY_RE = re.compile(r"(sign|signature|hmac|nonce|_sig|x-sig|checksum|digest)", re.I)
+# Keys carrying a SERVER-SIDE SIGNATURE over the request (HMAC/MAC/digest) — irreproducible without the
+# signing secret, so a genuine keep-UI bail. Bounded to whole tokens so it does NOT match incidental
+# substrings ("design", "assignee", "macAddress"). A bare nonce / idempotency-key is deliberately NOT here:
+# those are client-minted and reproducible — the COMPUTED bucket handles them; only a signature OVER the
+# payload bails.
+SIGNING_KEY_RE = re.compile(r"(?:^|[^a-zA-Z])(signature|hmac|sig|mac|digest|checksum)(?:[^a-zA-Z]|$)", re.I)
 CAPTCHA_KEY_RE = re.compile(r"(recaptcha|g-recaptcha-response|h-captcha|cf-turnstile|captcha)", re.I)
 HIGH_ENTROPY_RE = re.compile(r"^[A-Za-z0-9+/_-]{32,}=*$")
 ANTIBOT_HEADER_RE = re.compile(r"(cf-mitigated|cf-chl|x-datadome|akamai|perimeterx|x-px|incap)", re.I)
@@ -70,7 +75,7 @@ def main() -> None:
             if CAPTCHA_KEY_RE.search(k):
                 reasons.append(f"CAPTCHA/Turnstile token in submit ({k}) — only the live browser can mint it")
             elif SIGNING_KEY_RE.search(k) and (HIGH_ENTROPY_RE.match(v) or len(v) >= 24):
-                reasons.append(f"signed/nonce field in submit ({k}) — likely minted by in-page JS")
+                reasons.append(f"server-signature field in submit ({k}) — irreproducible without the signing secret")
 
     # active anti-bot challenge anywhere in the captured responses
     for r in rows:

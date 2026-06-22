@@ -501,6 +501,66 @@ def test_golden_source_bail1_when_truly_client_rendered():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_poll_detects_nonstandard_status_field():
+    # readiness named /jobState (not /status) must still synthesize a POLL waiting for the TERMINAL value.
+    def runset(label: str, inv: str, job: str) -> tuple[list[dict], dict]:
+        rows = [
+            _row("p0", "POST", "/graphql", op="Apply", req={"variables": {"invoiceId": inv}},
+                 resp={"data": {"apply": {"jobId": job}}}),
+            _row("p1", "GET", "/job", req={"jobId": job}, resp={"jobState": "PROCESSING"}),
+            _row("p2", "GET", "/job", req={"jobId": job}, resp={"jobState": "DONE"}),
+            _row("p3", "GET", "/download", req={"jobId": job}, resp={"ok": True}, rctype="application/pdf"),
+        ]
+        return rows, _inputs(label, [_binding("rInv", inv)])
+    plan = _build(*runset("run1", "inv_aaaa1111bbbb", "job_777fff888eee"),
+                  *runset("run2", "inv_cccc2222dddd", "job_999aaa000bbb"))
+    polls = plan["control_flow"]["polls"]
+    assert polls and polls[0]["predicate"]["path"] == "json-ptr:/jobState", plan["control_flow"]
+    assert polls[0]["predicate"]["equals"] == "DONE"
+
+
+def test_poll_detects_status_code_transition():
+    # readiness by status-code (202 -> 200), no recognizable body status field -> a status-code POLL.
+    def runset(label: str, inv: str, job: str) -> tuple[list[dict], dict]:
+        p1 = _row("p1", "GET", "/job", req={"jobId": job}, resp={"queued": True}); p1["status"] = 202
+        p2 = _row("p2", "GET", "/job", req={"jobId": job}, resp={"queued": False}); p2["status"] = 200
+        rows = [
+            _row("p0", "POST", "/graphql", op="Apply", req={"variables": {"invoiceId": inv}},
+                 resp={"data": {"apply": {"jobId": job}}}),
+            p1, p2,
+            _row("p3", "GET", "/download", req={"jobId": job}, resp={"ok": True}, rctype="application/pdf"),
+        ]
+        return rows, _inputs(label, [_binding("rInv", inv)])
+    plan = _build(*runset("run1", "inv_aaaa1111bbbb", "job_777fff888eee"),
+                  *runset("run2", "inv_cccc2222dddd", "job_999aaa000bbb"))
+    polls = plan["control_flow"]["polls"]
+    assert polls and polls[0]["predicate"]["over"] == "status-code", plan["control_flow"]
+    assert polls[0]["predicate"]["equals"] == 200
+
+
+def test_continuation_recognises_widened_names():
+    # nextPageToken / hasNextPage are continuation signals (not only /cursor, /has_more)...
+    assert c._continuation_signal({"respBody": {"items": [1], "nextPageToken": "tok_abc"}}) is not None
+    s = c._continuation_signal({"respBody": {"data": {"hasNextPage": True}}})
+    assert s is not None and s.get("equals") is False
+    # ...but a plain offset/page is NOT a continuation signal (avoid a false REPEAT)
+    assert c._continuation_signal({"respBody": {"page": 2, "items": [1]}}) is None
+
+
+def test_short_derived_id_classified_not_unexplained():
+    # a SHORT job id (returned by an apply, threaded into the export) co-varies with the input -> PRODUCED/
+    # DERIVED, not UNEXPLAINED, despite being low-entropy.
+    def runset(label: str, inv: str, job: str) -> tuple[list[dict], dict]:
+        rows = [
+            _row("p0", "POST", "/apply", req={"invoiceId": inv}, resp={"jobId": job}),
+            _row("p1", "POST", "/export", req={"jobId": job}, resp={"ok": True}, rctype="application/pdf"),
+        ]
+        return rows, _inputs(label, [_binding("rInv", inv)])
+    plan = _build(*runset("run1", "42", "70"), *runset("run2", "97", "93"))
+    v = _value_for(plan, "/jobId")
+    assert v is not None and v["bucket"] in ("DERIVED", "PRODUCED"), v
+
+
 def test_repeat_inserted_for_pagination_signal():
     def runset(label: str, inv: str) -> tuple[list[dict], dict]:
         rows = [
