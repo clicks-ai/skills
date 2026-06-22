@@ -141,7 +141,7 @@ def test_input_and_const_buckets():
     assert inp["source"]["kind"] == "step_input"
     assert const is not None and const["bucket"] == "CONST", const
     assert const["value"] == "pdf"
-    assert plan["gate"]["G1_self_contained"]["pass"] is True
+    assert plan["gate"]["G1_values_bucketed"]["clean"] is True
     assert plan["verdict"] == "API-CANDIDATE"
 
 
@@ -210,7 +210,7 @@ def test_path_threaded_jobid_is_produced() -> None:
     # the producing POST /jobs mutation must be pulled into R by the path-carrier closure
     assert any(n["request"]["locator"].endswith("/jobs") and n["is_mutation"] for n in plan["subset_R"])
     assert plan["dangling_produced"] == []
-    assert plan["gate"]["G1_self_contained"]["pass"] is True
+    assert plan["gate"]["G1_values_bucketed"]["clean"] is True
     assert plan["verdict"] == "API-CANDIDATE"
 
 
@@ -230,9 +230,10 @@ def test_path_threaded_jobid_dangling_when_mutation_missing() -> None:
     miss = _value_for(plan, "path-tmpl:jobs")
     assert miss is not None and miss["bucket"] == "UNEXPLAINED", miss
     assert any(u["carrier"] == "path-tmpl:jobs" for u in plan["unexplained"]), plan["unexplained"]
-    assert plan["gate"]["G1_self_contained"]["pass"] is False
-    assert plan["verdict"] == "KEEP-UI"
-    assert plan["bail"]["code"] == "BAIL-2"
+    # the miss is REPORTED (still detected, not dropped) but ADVISORY — replayed verbatim; PROVE is the arbiter
+    assert plan["gate"]["G1_values_bucketed"]["clean"] is False
+    assert plan["verdict"] == "API-CANDIDATE"
+    assert plan["bail"] is None
 
 
 def test_computed_generator_bucket():
@@ -276,9 +277,10 @@ def test_ambient_input_bucket():
 # ---- the two MISS fixtures (the whole point) -------------------------------------------------------
 
 
-def test_unexplained_high_entropy_unmatched_value_fails_gate():
-    # a high-entropy field that equals NOTHING (no input, no response, no nonce-name hint) -> UNEXPLAINED
-    # -> G1 FAIL -> nonzero. (The fingerprint of a missed call.)
+def test_unexplained_high_entropy_value_is_reported_but_advisory():
+    # a high-entropy field that equals NOTHING (no input, no response, no nonce-name hint) -> UNEXPLAINED.
+    # It is REPORTED (still detected — the fingerprint of a missed call) but advisory: replayed verbatim, and
+    # PROVE decides. (Genuinely-unreproducible signatures are caught earlier by the bail-scan, not here.)
     def runset(label: str, inv: str, mystery: str) -> tuple[list[dict], dict]:
         rows = [
             _row("u0", "POST", "/export",
@@ -292,9 +294,10 @@ def test_unexplained_high_entropy_unmatched_value_fails_gate():
     un = _value_for(plan, "/signature")
     assert un is not None and un["bucket"] == "UNEXPLAINED", un
     assert plan["unexplained"], "expected a non-empty unexplained list"
-    assert plan["gate"]["G1_self_contained"]["pass"] is False
-    assert plan["verdict"] == "KEEP-UI"
-    assert plan["bail"]["code"] == "BAIL-2"
+    # the miss is REPORTED (still detected, not dropped) but ADVISORY — replayed verbatim; PROVE is the arbiter
+    assert plan["gate"]["G1_values_bucketed"]["clean"] is False
+    assert plan["verdict"] == "API-CANDIDATE"
+    assert plan["bail"] is None
 
 
 def test_dangling_produced_when_mutation_missing_from_capture():
@@ -369,9 +372,10 @@ def test_contested_value_matches_two_buckets():
     assert con is not None and con["bucket"] == "CONTESTED", con
     assert set(con["all_matching_buckets"]) >= {"INPUT", "PRODUCED"}, con["all_matching_buckets"]
     assert plan["contested"], "expected a non-empty contested list"
-    assert plan["gate"]["G1_self_contained"]["pass"] is False
-    assert plan["verdict"] == "KEEP-UI"
-    assert plan["bail"]["code"] == "BAIL-2"
+    # the miss is REPORTED (still detected, not dropped) but ADVISORY — replayed verbatim; PROVE is the arbiter
+    assert plan["gate"]["G1_values_bucketed"]["clean"] is False
+    assert plan["verdict"] == "API-CANDIDATE"
+    assert plan["bail"] is None
 
 
 def test_bail1_when_golden_in_no_response():
@@ -412,7 +416,7 @@ def test_poll_inserted_for_repeated_status_read():
     # the poll exits immediately and fetches the artifact prematurely (the Metaview async bug).
     assert poll["predicate"]["equals"] == "COMPLETE", poll["predicate"]["equals"]
     assert any(s["op"] == "POLL" for s in plan["steps"])
-    assert plan["gate"]["G2_no_fixed_wait"]["pass"] is True
+    assert plan["gate"]["G2_readiness"]["clean"] is True
 
 
 def test_low_entropy_input_is_classified_not_unexplained():
@@ -575,8 +579,9 @@ def test_repeat_inserted_for_pagination_signal():
     assert plan["control_flow"]["repeats"], "expected a REPEAT for the cursor signal"
 
 
-def test_main_returns_nonzero_on_miss() -> None:
-    # end-to-end: main() writes plan.json and returns nonzero when a value is UNEXPLAINED.
+def test_main_reports_miss_but_exits_zero() -> None:
+    # end-to-end: an UNEXPLAINED value is REPORTED in plan.json but is advisory — main() still exits 0
+    # (API-CANDIDATE), because PROVE (content-match on held-out) is the arbiter, not "explain every value".
     root = tempfile.mkdtemp()
     try:
         rows1 = [_row("u0", "POST", "/export", req={"variables": {"invoiceId": "inv_aaaa1111bbbb",
@@ -587,10 +592,11 @@ def test_main_returns_nonzero_on_miss() -> None:
         r2 = _write_run(root, "run2", rows2, _inputs("run2", [_binding("rInv", "inv_cccc2222dddd")]))
         plan_path = os.path.join(root, "plan.json")
         rc = c.main(["--runs", r1, r2, "--segment-id", "s0", "--plan", plan_path])
-        assert rc != 0, "a MISS must exit nonzero"
+        assert rc == 0, "a MISS is advisory now — reported, not fatal"
         with open(plan_path) as f:
             plan = json.load(f)
-        assert plan["verdict"] == "KEEP-UI"
+        assert plan["verdict"] == "API-CANDIDATE"
+        assert plan["unexplained"], "the miss must still be REPORTED"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

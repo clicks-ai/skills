@@ -163,6 +163,14 @@ def is_high_entropy(val: object) -> bool:
     return shannon_bits(s) >= MIN_SHANNON_BITS
 
 
+_UUID_V4_RE = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z", re.I)
+
+
+def _is_uuid_v4(val: object) -> bool:
+    # a random (version-4) UUID — the shape of a client-minted id/nonce, independent of the field name.
+    return isinstance(val, str) and bool(_UUID_V4_RE.match(val))
+
+
 def _is_trivial(val: object) -> bool:
     # too low-cardinality to anchor a DERIVED edge without coincidence (booleans, single chars, sentinels).
     s = str(val).strip().lower()
@@ -246,8 +254,16 @@ def find_golden_source(run: Run) -> JsonObj:
     # base64-in-JSON is found, not wrongly declared client-rendered. found:false => BAIL-1.
     golden = run.golden
     tag = golden.get("tag")
+    if not (isinstance(tag, str) and tag):
+        # capture sometimes leaves tag null; recover it from the golden's filename extension so the
+        # type-magic / RAW strategies still have a type to match (".../foo.pdf" -> "pdf"). Accept either key
+        # the capture used for the path ("path" or "file").
+        gp = golden.get("path") or golden.get("file")
+        base = gp.rsplit("/", 1)[-1] if isinstance(gp, str) else ""
+        tag = base.rsplit(".", 1)[-1].lower() if "." in base else tag
     magic = _MAGIC_FOR_TAG.get(tag) if isinstance(tag, str) else None
-    raw_sha = golden.get("sha256")
+    # the golden's identity hash — accept either spelling the capture wrote ("sha256" or "sha256_prefix").
+    raw_sha = golden.get("sha256") or golden.get("sha256_prefix")
     gsha = raw_sha if isinstance(raw_sha, str) and len(raw_sha) >= 16 else None
     hits: list[tuple[int, str]] = []  # (exchange seq, extractor recipe)
     for i, row in enumerate(run.rows):
@@ -277,14 +293,19 @@ def _artifact_extractor(row: JsonObj, tag: object, magic: bytes | None, gsha: st
     ctype = ((row.get("respHeaders") or {}).get("content-type", "") or row.get("contentType", "") or "").lower()
     if isinstance(tag, str) and tag and (tag in ctype or _ctype_matches_tag(ctype, tag)):
         return "whole-payload"
-    if magic is not None:
+    # BASE64 runs whenever we hold EITHER a type-magic OR the golden sha — the sha256 is a complete, tag-free
+    # identity, so a binary base64-in-JSON is found even when the capture recorded no artifact type (tag null).
+    if magic is not None or gsha is not None:
         body = row.get("respBody")
         if isinstance(body, (dict, list)):
             leaves: list[tuple[str, object]] = []
             _flatten(body, "", leaves)
             for ptr, val in leaves:
                 dec = _b64_artifact(val) if isinstance(val, str) else None
-                if dec is not None and (dec.startswith(magic) or (gsha is not None and _sha16(dec) == gsha)):
+                if dec is not None and (
+                    (magic is not None and dec.startswith(magic))
+                    or (gsha is not None and _sha16(dec) == gsha[:16])
+                ):
                     return f"json-ptr:{ptr}|base64"
     return None
 
@@ -328,10 +349,23 @@ def _ctype_matches_tag(ct: str, tag: str) -> bool:
     return table.get(tag, tag) in ct
 
 
+def _reg_domain(origin: object) -> str:
+    # registrable-domain heuristic = last two DNS labels of the host. A denoise filter (NOT a security
+    # control): the workflow lives on the golden artifact's site; third-party analytics / ads / RUM beacons
+    # live on other sites and never produce workflow data. (Multi-part TLDs like co.uk over-keep, which is the
+    # safe direction — we'd rather keep a sibling than drop a real API call.)
+    host = re.sub(r"^https?://", "", str(origin or "")).split("/")[0].split(":")[0]
+    labels = [x for x in host.split(".") if x]
+    return ".".join(labels[-2:]) if len(labels) >= 2 else host
+
+
 def transitive_subset(run: Run, golden_seqs: list[int]) -> list[int]:
     # Seed R with the golden-producing exchange(s); then backward-close: any earlier call whose response
-    # produces a high-entropy value that some in-R request CONSUMES is pulled in (keeps the CSRF-token GET
-    # etc. — DESIGN FN-2). A call is noise only if no in-R request derives a field from it.
+    # produces a non-trivial value that some in-R request CONSUMES is pulled in (keeps the CSRF-token GET
+    # etc. — DESIGN FN-2). A call is noise only if no in-R request derives a field from it. We also drop any
+    # exchange off the golden's own site — third-party telemetry/ads share trace ids with the app and would
+    # otherwise bridge into R as hundreds of UNEXPLAINED values (DESIGN FN-3 / real-capture denoise).
+    site = _reg_domain(run.rows[golden_seqs[0]].get("origin")) if golden_seqs else ""
     in_r: set[int] = set(golden_seqs)
     changed = True
     while changed:
@@ -344,6 +378,8 @@ def transitive_subset(run: Run, golden_seqs: list[int]) -> list[int]:
             for src_seq in range(cons_seq):
                 if src_seq in in_r:
                     continue
+                if site and _reg_domain(run.rows[src_seq].get("origin")) != site:
+                    continue  # off-site telemetry/ads never produce workflow data
                 produced = {canon(v) for _, v in response_sources(run.rows[src_seq]) if not _is_trivial(v)}
                 if need_canon & produced:
                     in_r.add(src_seq)
@@ -449,9 +485,12 @@ class Classifier:
             info["_const"] = {"value": val}
             matches.append("CONST")
 
-        # COMPUTED (generator) — a high-entropy value that differs every run, matches no input/response,
-        # on a carrier whose name hints a minted nonce/idempotency key (DESIGN FN-1, CLASS-6).
-        if high_entropy and differs and not input_ref and not src and self._looks_generated(extractor):
+        # COMPUTED (client-minted) — a high-entropy value that differs every run and matches no input/response,
+        # AND is either named like a generated token (nonce/idempotency/uuid/…) OR is itself a random UUID v4.
+        # A UUID v4 sourced from no response IS a client-minted id no matter the field name ("operationId" reads
+        # the same as "idempotencyKey") — recognise the thing, not one spelling (DESIGN FN-1, CLASS-6). Replay
+        # mints a fresh one per call, so it parameterizes to any instance.
+        if high_entropy and differs and not input_ref and not src and (self._looks_generated(extractor) or _is_uuid_v4(val)):
             info["_computed"] = {"recipe": {"kind": "generator", "fn": "uuid_v4", "args": []}, "differs_across_runs": True}
             matches.append("COMPUTED")
 
@@ -581,17 +620,27 @@ def build_control_flow(run: Run, r_seqs: list[int], node_of_seq: dict[int, str])
         loc = _locator(run.rows[seq])
         rows_by_loc.setdefault(loc, []).append(run.rows[seq])
         first_seq.setdefault(loc, seq)
+    undetected_gap = False
     for loc, rows in rows_by_loc.items():
         if len(rows) >= 2 and not is_mutation(rows[0]):
             pred = _detect_readiness(rows)
             if pred is not None:
                 polls.append({"read": node_of_seq[first_seq[loc]],
                               "predicate": {**pred, "timeout_s": 60, "interval_s": 2}})
+            else:
+                # a repeated read with no pinnable readiness signal: the wait was out-of-band (the UI watched a
+                # websocket/SSE channel, not an HTTP status). Don't fabricate a poll — fall back to retrying the
+                # terminal act until it yields the artifact (faithful wait; PROVE judges the result).
+                undetected_gap = True
     # REPEAT: a response carrying a continuation signal (cursor/next/has_more) fed back -> pagination loop.
     for seq in r_seqs:
         cont = _continuation_signal(run.rows[seq])
         if cont:
             repeats.append({"node": node_of_seq[seq], "until_predicate": cont, "accumulate": "items"})
+    if undetected_gap:
+        retries.append({"act": "terminal", "until": "artifact_present", "max_attempts": 30, "interval_s": 2,
+                        "reason": "async readiness was out-of-band (a repeated read carried no pinnable signal — "
+                                  "e.g. websocket-driven generation); retry the act until it yields the artifact"})
     return {"polls": polls, "repeats": repeats, "retries": retries}
 
 
@@ -720,12 +769,18 @@ def _is_auto_header(extractor: str) -> bool:
     # masquerade as UNEXPLAINED. Auth headers are handled by S5 (probe_auth), not here.
     if not extractor.startswith("header:"):
         return False
-    name = extractor.split(":", 1)[1]
+    name = extractor.split(":", 1)[1].lower()
     auto = {"host", "connection", "content-length", "content-type", "origin", "referer", "cookie",
             "user-agent", "accept", "accept-encoding", "accept-language", "authorization", "x-api-key",
             "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-dest", "sec-fetch-mode",
-            "sec-fetch-site", "pragma", "cache-control", "dnt", "te"}
-    return name in auto
+            "sec-fetch-site", "pragma", "cache-control", "dnt", "te",
+            # distributed-tracing / telemetry headers the browser + RUM agents inject automatically — never
+            # workflow data (else every traced app reads as UNEXPLAINED).
+            "traceparent", "tracestate", "baggage", "b3", "sentry-trace", "newrelic",
+            "x-cloud-trace-context", "x-amzn-trace-id", "x-request-id", "x-correlation-id"}
+    if name in auto:
+        return True
+    return name.startswith(("x-datadog-", "x-b3-", "x-dd-", "dd-"))
 
 
 def collect_misses(values: list[JsonObj], r_seqs: list[int], node_of_seq: dict[int, str]) -> tuple[list[JsonObj], list[JsonObj], list[JsonObj]]:
@@ -758,8 +813,8 @@ def build_plan(runs: list[Run], segment_id: str, match: str | None) -> JsonObj:
             "golden_source": gs, "subset_R": [], "values": [], "steps": [],
             "control_flow": {"polls": [], "repeats": [], "retries": []},
             "unexplained": [], "contested": [], "dangling_produced": [],
-            "gate": {"G1_self_contained": {"pass": False, "reason": "golden in no response — client-rendered"},
-                     "G2_no_fixed_wait": {"pass": False, "reason": "no R to check"}},
+            "gate": {"G1_values_bucketed": {"clean": False, "advisory": True, "reason": "golden in no response — client-rendered"},
+                     "G2_readiness": {"clean": False, "advisory": True, "reason": "no R to check"}},
             "verdict": "KEEP-UI",
             "bail": {"code": "BAIL-1", "reason": "golden appears in no response nor any ordered assembly"},
         }
@@ -781,15 +836,17 @@ def build_plan(runs: list[Run], segment_id: str, match: str | None) -> JsonObj:
             else "produces a value an in-R request consumes",
         })
 
-    g1_pass = not unexplained and not contested and not dangling
-    g2_pass = _g2_check(control_flow, primary, r_seqs)
+    # G1 (every value explained) and G2 (every async gap has an HTTP poll) are NO LONGER keep-UI bails — both
+    # are weak "prove it's safe up front" proxies that false-bail on real captures (constants / GraphQL
+    # boilerplate / websocket-driven waits). The faithful replay sends unexplained values verbatim and retries
+    # the act when the wait was out-of-band; the genuinely-unreproducible cases (signature/captcha) are caught
+    # by the bail-scan, and a wrong/hardcoded/raced value is caught by PROVE — the content-match on a fresh,
+    # held-out instance, which is strictly stronger than either. BAIL-1 (no API produces this artifact at all)
+    # stays the one classify-level keep-UI. Misses/gaps are REPORTED so the operator can spot a mis-identified
+    # input, but they do not gate the verdict.
+    g1_clean = not unexplained and not contested and not dangling
+    g2_clean = _g2_check(control_flow, primary, r_seqs)
     bail = None
-    if not g1_pass:
-        # the unresolvable-MISS bail (BAIL-2). A bounded code cross-check is the operator's next move; the
-        # gate reports the miss either way.
-        bail = {"code": "BAIL-2", "reason": _miss_reason(unexplained, contested, dangling)}
-    elif not g2_pass:
-        bail = {"code": "BAIL-3", "reason": "an async gap has no pollable observation"}
 
     return {
         "schema": "plan/v1", "segment_id": segment_id, "runs": [r.run_dir for r in runs],
@@ -803,14 +860,18 @@ def build_plan(runs: list[Run], segment_id: str, match: str | None) -> JsonObj:
         "contested": contested,
         "dangling_produced": dangling,
         "gate": {
-            "G1_self_contained": {"pass": g1_pass,
-                                  "reason": "all values bucketed; no unexplained/contested/dangling" if g1_pass
-                                  else _miss_reason(unexplained, contested, dangling)},
-            "G2_no_fixed_wait": {"pass": g2_pass,
-                                 "reason": "every async gap has a POLL; zero fixed sleeps" if g2_pass
-                                 else "an async gap (repeated status read) lacks a POLL"},
+            "G1_values_bucketed": {"clean": g1_clean, "advisory": True,
+                                   "reason": "all values bucketed" if g1_clean
+                                   else _miss_reason(unexplained, contested, dangling)
+                                   + " — replayed verbatim; PROVE is the arbiter"},
+            "G2_readiness": {"clean": g2_clean, "advisory": True,
+                             "reason": "every async gap has a POLL; zero fixed sleeps" if g2_clean
+                             else "a repeated read had no pinnable HTTP signal — act is retried until the "
+                                  "artifact appears; PROVE is the arbiter"},
         },
-        "verdict": "API-CANDIDATE" if (g1_pass and g2_pass) else "KEEP-UI",
+        # past the BAIL-1 return => an HTTP API DOES produce the golden. That is the one classify-level gate;
+        # auth-reproducibility (S5) and PROVE (content-match on held-out instances) are the real arbiters.
+        "verdict": "API-CANDIDATE",
         "bail": bail,
     }
 
@@ -853,12 +914,12 @@ def _miss_reason(unexplained: list[JsonObj], contested: list[JsonObj], dangling:
 
 
 def report(plan: JsonObj) -> None:
-    g1 = plan["gate"]["G1_self_contained"]
-    g2 = plan["gate"]["G2_no_fixed_wait"]
+    g1 = plan["gate"]["G1_values_bucketed"]
+    g2 = plan["gate"]["G2_readiness"]
     print(f"segment {plan['segment_id']}: |R|={len(plan['subset_R'])} values={len(plan['values'])} "
           f"verdict={plan['verdict']}", file=sys.stderr)
-    print(f"  G1 self-contained: {'PASS' if g1['pass'] else 'FAIL'} — {g1['reason']}", file=sys.stderr)
-    print(f"  G2 no-fixed-wait:  {'PASS' if g2['pass'] else 'FAIL'} — {g2['reason']}", file=sys.stderr)
+    print(f"  G1 values-bucketed (advisory): {'CLEAN' if g1['clean'] else 'MISSES'} — {g1['reason']}", file=sys.stderr)
+    print(f"  G2 readiness (advisory):       {'CLEAN' if g2['clean'] else 'RETRY-ACT'} — {g2['reason']}", file=sys.stderr)
     for u in plan["unexplained"]:
         print(f"  UNEXPLAINED {u['node']} {u['carrier']}: {u['reason']}", file=sys.stderr)
     for c in plan["contested"]:
@@ -870,8 +931,9 @@ def report(plan: JsonObj) -> None:
 
 
 def gate_passes(plan: JsonObj) -> bool:
-    return (plan["verdict"] == "API-CANDIDATE"
-            and not plan["unexplained"] and not plan["contested"] and not plan["dangling_produced"])
+    # exit 0 = the API path is viable (an HTTP API produces the golden — not BAIL-1). Misses/readiness gaps are
+    # advisory (replayed verbatim / retried) and reported, not fatal; auth (S5) + PROVE (S7) are the arbiters.
+    return bool(plan["verdict"] == "API-CANDIDATE")
 
 
 def main(argv: list[str] | None = None) -> int:

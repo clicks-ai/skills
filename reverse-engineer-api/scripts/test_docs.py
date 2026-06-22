@@ -77,7 +77,7 @@ def test_teach_prompt_is_generic() -> None:
 def test_teach_prompt_carries_the_disciplines() -> None:
     assert "WHOLE SEGMENT FROM A CLEAN STATE" in TEACH
     assert "varied inputs" in TEACH
-    assert "NOT run teach_insert" in TEACH and "until every gate" in TEACH
+    assert "NOT run teach_insert" in TEACH and "until the real gates" in TEACH
     assert "SKILL.md" in TEACH and "checklist" in TEACH.lower()  # the agent works the SKILL.md checklist
 
 def test_teach_prompt_example_is_labeled() -> None:

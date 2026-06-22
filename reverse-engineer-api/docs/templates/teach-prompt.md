@@ -30,9 +30,16 @@ API-backed step.
   ALL be inside the capture. Run the entire segment >=2 times with different inputs so the classifier can
   separate constants / inputs / computed values. Keep each UI output as that run's golden.
 
-- You may NOT run teach_insert (box 8) until every gate has passed: box 3 not a bail, box 4
-  unexplained==[], box 5 auth reproducible, box 7 MATCH on all held-out instances. KEEP UI on any
-  BAIL/FAIL and tell me which gate and why.
+- DECLARE THE PER-INSTANCE INPUT. The one value that DIFFERS between your runs — the id/name of the thing you
+  operate on (the record/note/invoice you opened) — must be declared as a step input (a binding in
+  segment_inputs), with its per-run value. This is what tells the classifier "this is THE input"; without it
+  that value is replayed verbatim and the API step stays pinned to the instance you captured. If box 4 reports
+  the changing id as UNEXPLAINED, that's the signal you forgot to declare it.
+
+- You may NOT run teach_insert (box 8) until the real gates pass: box 3 not a bail, box 4 verdict ==
+  API-CANDIDATE (only BAIL-1 = client-rendered stops here; unexplained values are advisory/verbatim), box 5
+  auth reproducible, box 7 MATCH on all held-out instances. KEEP UI on any BAIL/FAIL and tell me which gate
+  and why.
 
 - Do NOT git commit — I'll review the diff.
 ```

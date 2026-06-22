@@ -61,8 +61,10 @@ def test_iron_laws_are_delete_and_restart():
 def test_iron_law_unit_is_segment():
     assert re.search(r"unit is a SEGMENT", SKILL, re.I)
 
-def test_iron_law_no_unexplained_no_dropped():
-    assert "UNEXPLAINED" in SKILL and "DROPPED" in SKILL
+def test_iron_law_replay_faithfully_prove_judges():
+    # Iron Law 2 is now "replay faithfully; PROVE judges" — an unexplained value is replayed verbatim, not a
+    # stop; the one classify-level stop is BAIL-1, and PROVE is the arbiter.
+    assert "verbatim" in SKILL and "BAIL-1" in SKILL and "PROVE" in SKILL
 
 def test_iron_law_prove_and_bail_is_success():
     assert re.search(r"PROVEN", SKILL) and re.search(r"bail.{0,30}success", SKILL, re.I | re.S)
@@ -94,8 +96,8 @@ def test_every_box_has_a_gate_token():
 
 def test_gates_name_the_output_tokens():
     cl = _checklist()
-    for token in ("segment_ids != []", "G1_self_contained", "G2_no_fixed_wait",
-                  'verdict == "API-CANDIDATE"', "working == true", 'verdict == "PROVEN"'):
+    for token in ("segment_ids != []", 'verdict == "API-CANDIDATE"', "BAIL-1",
+                  "working == true", 'verdict == "PROVEN"'):
         assert token in cl, f"a gate must check the literal output token {token!r}"
 
 def test_keep_ui_is_an_explicit_exit():

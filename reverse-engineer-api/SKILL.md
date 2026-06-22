@@ -33,10 +33,12 @@ is to **stop, delete what you produced, and restart the box from its command** �
    the UI set up out of band — **delete the chain and re-capture the whole segment from a clean start.**
    Mis-sizing this unit is the documented root cause of every prior failure.
 
-2. **No value may be UNEXPLAINED and no behavior may be DROPPED.** Every byte the replay sends must be
-   sourced (const / input / derived / produced / computed); every wait, loop, retry, and assembly the UI
-   performed must be reproduced. If the classifier reports one unexplained or contested value, or a wait
-   with no poll — **delete the plan and re-capture wider; do NOT hand-fill the gap.**
+2. **Replay faithfully; never hand-fill or fake.** Transcribe the captured request as-is and parameterize
+   what the classifier can source (const / input / derived / produced / computed). A value it can't source is
+   **replayed verbatim** — never invented, scraped from the DOM, or hardcoded by your own judgment. Reproduce
+   every wait/loop/retry the UI performed (poll a ready signal, or retry the act until the artifact appears).
+   An unexplained/contested value is **reported, not a stop** — the arbiter is Iron Law 3 (PROVE), not a
+   value-by-value pre-check. The only classify-level stop is BAIL-1 (no response produces the artifact at all).
 
 3. **Ship only what is PROVEN; bailing is success.** "A file was produced" is not proof. The output must
    EQUAL the UI's output under a frozen comparator, on instances you did **not** build on, that are mutually
@@ -92,11 +94,12 @@ TEACH <skill>/<STEP>
 [ ] 4  CLASSIFY  (INV-1 + INV-2)
        python scripts/classify_values.py --runs .o11y/run .o11y/run2 \
          --segments segments.json --segment <segment_id> --out plan.json
-       GATE: plan.json → gate.G1_self_contained.pass == true
-                      AND gate.G2_no_fixed_wait.pass   == true
-                      AND verdict == "API-CANDIDATE"
-       unexplained/contested/dangling_produced non-empty, OR a wait with no POLL,
-       OR a continuation with no REPEAT, OR bail != null  →  KEEP UI (or re-capture wider, box 1).
+       GATE: plan.json → verdict == "API-CANDIDATE"  (i.e. bail == null).
+       bail.code == "BAIL-1" (golden in no response — client-rendered)  →  KEEP UI.
+       G1 (values) and G2 (readiness) are ADVISORY: unexplained values are replayed verbatim and the act is
+       retried for an out-of-band wait — both reported, neither a stop. PROVE (box 7) is the real arbiter.
+       If a reported miss is the INPUT itself (the value that should change per instance), declare it in the
+       step inputs and re-capture — otherwise let it ride to PROVE.
 
 [ ] 5  AUTH  (INV-4)
        printf '%s' '{"method":"<M>","url":"<URL>","headers":{<non-auth>},"body":<json-string|null>}' > /tmp/req.json
@@ -139,7 +142,7 @@ required action is the gate, not the shortcut. (These are generic — they apply
 | "It worked once, so it's fine to ship." | One pass proves nothing — an async race or shared-state coincidence passes once, then exports junk on reuse. | Run box 7 with N≥2 on fresh, isolated, boundary instances. No PROVEN ⇒ keep UI. |
 | "I'll just add a `sleep` / fixed `setTimeout` before the act." | A fixed wait is a race: it passes when the server is fast, fails when it's slow. That is dropped behavior (Iron Law 2). | The UI watched a ready signal — POLL *that* signal (box 4 emits the POLL; box 6 renders it). |
 | "The thing already exists, so just fetch the output directly." | The setup mutation that created it is part of the segment; skipping it means the chain depends on out-of-band state and ships a one-shot. | Re-capture the WHOLE segment from a clean start (box 1) so the mutation is inside the trace. |
-| "This one value is obviously a constant / obviously the input — I'll hardcode it." | You are judging a value; the classifier judges values, with co-variation + entropy evidence across ≥2 runs. | Let box 4 bucket it. An UNEXPLAINED/CONTESTED result ⇒ re-capture wider or keep UI. |
+| "This one value is obviously a constant / obviously the input — I'll hardcode it." | You are judging a value; the classifier judges values, with co-variation + entropy evidence across ≥2 runs. | Let box 4 bucket it. An UNEXPLAINED value is replayed VERBATIM (not hardcoded-by-judgment); if it's actually the per-instance input, declare it and re-capture — PROVE catches a wrong call either way. |
 | "I'll open the `.o11y/` capture files / write a `python -c` to inspect the wire." | Hand-grinding the raw wire is the old failure mode; `analyze.py`'s output already surfaces every request + response. | Use box 2's output only. Do not read raw capture files or script the wire. |
 | "I'll hand-hunt the cookie / try a few auth headers in a loop." | Manual auth tuning is non-deterministic churn; `probe_auth.py` finds the working auth in one bounded pass. | Run box 5 once. `working:false` ⇒ keep UI. |
 | "The golden isn't in any response, but the page clearly shows it — I'll scrape the DOM." | If no response (nor any ordered assembly) contains the output, it is client-rendered and not API-reproducible. | That is BAIL-1 at box 4 (`golden_source.found == false`) ⇒ keep UI. |
