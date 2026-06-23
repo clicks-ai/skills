@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>rea e2e — non-replayable (signed body)</title>
+<body>
+<pre id="log"></pre>
+<script>
+// Simulates a workflow whose submit carries a JS-minted signature — should be classified
+// non-replayable (bail to GUI), because a requests.Session() cannot reproduce the signature.
+async function submit() {
+  try {
+    const r = await fetch('https://jsonplaceholder.typicode.com/posts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'demo', signature: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2' })
+    });
+    const j = await r.json();
+    document.getElementById('log').append('posted id=' + j.id + '\n');
+  } catch (e) { document.getElementById('log').append('err ' + e + '\n'); }
+}
+setInterval(submit, 3000); submit();
+</script>
+</body>

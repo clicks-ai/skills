@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>rea e2e — replayable</title>
+<body>
+<pre id="log"></pre>
+<script>
+// Simulates a long-form submit: one JSON POST to a safe fake API. Includes a `password`
+// field so we can assert the engine redacts it. Fires repeatedly so the capture window catches it.
+async function submit() {
+  try {
+    const r = await fetch('https://jsonplaceholder.typicode.com/posts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'demo title', body: 'a long form field value', userId: 7, password: 'secret123' })
+    });
+    const j = await r.json();
+    document.getElementById('log').append('posted id=' + j.id + '\n');
+  } catch (e) { document.getElementById('log').append('err ' + e + '\n'); }
+}
+setInterval(submit, 3000); submit();
+</script>
+</body>
