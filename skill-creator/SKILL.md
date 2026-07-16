@@ -198,9 +198,51 @@ Each step definition has:
 
 - **`description`** (required): a short summary of what the step does. It is documentation for the main agent (and skill author) when choosing which step to run — it is not passed to the subagent. State what the step *returns* here as well, so the orchestrator knows what it gets back.
 - **`required_step_inputs`** (optional, but usually required): a map of input name to a short description of what the caller must provide. The main agent passes a value for each of these when it runs the step.
-- **`model`** (optional): the model the subagent runs on. Omit to use the default.
+- **`model`** (optional): the model the subagent runs on. Set it only when the user explicitly requests a specific model for this step; otherwise omit it and the subagent runs on the default. See **Choosing a model for a step** below for the accepted values and rules.
 
-The file `steps/<step_name>.md` (its entire contents) becomes the subagent's instructions.
+### Choosing a model for a step
+
+The optional `model` key sets which model a step's subagent runs on. It is set per step, so different steps in the same skill can run on different models — a cheap, fast model for a mechanical step, a stronger model for a judgment-heavy one.
+
+**Only set `model` when the user explicitly requests a specific model for a specific step.** This mirrors the rule about not adding steps unprompted: do not choose, add, or change a step's model on your own initiative. When the user asks for a model on a step, set exactly that model on exactly that step and leave every other step's `model` untouched. When the user says nothing about a step's model, omit the key entirely so the subagent uses the default.
+
+The value must be one of the strings listed below, written verbatim — these are the only accepted values. The `-low` / `-medium` / `-high` / `-xhigh` suffix selects the reasoning-effort variant; the bare name (no suffix) is that model's default variant. If the user names a model that is not in this list, do not guess or substitute the closest match — ask them to pick one of these values.
+
+Claude:
+- `claude-sonnet-4-6`
+- `claude-opus-4-6`
+- `claude-opus-4-7`
+
+GPT-5.6 Terra:
+- `gpt-5.6-terra`, `gpt-5.6-terra-low`, `gpt-5.6-terra-medium`, `gpt-5.6-terra-high`, `gpt-5.6-terra-xhigh`
+
+GPT-5.6 Luna:
+- `gpt-5.6-luna`, `gpt-5.6-luna-low`, `gpt-5.6-luna-medium`, `gpt-5.6-luna-high`, `gpt-5.6-luna-xhigh`
+
+GPT-5.5:
+- `gpt-5.5`, `gpt-5.5-low`, `gpt-5.5-medium`, `gpt-5.5-high`, `gpt-5.5-xhigh`
+
+GPT-5.4:
+- `gpt-5.4`, `gpt-5.4-low`, `gpt-5.4-medium`, `gpt-5.4-high`, `gpt-5.4-xhigh`
+
+GPT-5.4 mini:
+- `gpt-5.4-mini`, `gpt-5.4-mini-low`, `gpt-5.4-mini-medium`, `gpt-5.4-mini-high`, `gpt-5.4-mini-xhigh`
+
+Example — one steps, pinned to a user-requested model:
+
+```yaml
+---
+name: salesforce
+description: Use this skill to interact with the Salesforce CRM.
+steps:
+  login:
+    description: Navigates to salesforce and logs in.
+    required_step_inputs:
+      user_name: the Salesforce user name to log in with
+      password: the password for that user
+    model: gpt-5.4-mini-high
+---
+```
 
 ### Defining `required_step_inputs` correctly
 
@@ -346,7 +388,7 @@ Build a new SKILL.md or step.md against these skeletons. Section names are a con
 | --- | --- |
 | `name` | the skill's identifier |
 | `description` | when to trigger **and when not to** |
-| `steps:` | map of step name → contract: `description` (what it does and returns), `required_step_inputs` (each input → a one-line contract), `model:` (the model the subagent runs on) |
+| `steps:` | map of step name → contract: `description` (what it does and returns), `required_step_inputs` (each input → a one-line contract), `model:` (optional; the model the subagent runs on — set only on explicit user request, and only to one of the accepted values in **Choosing a model for a step**) |
 
 ### Body sections, in order — reference material first, temporal spine last
 
