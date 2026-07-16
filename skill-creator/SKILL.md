@@ -223,6 +223,16 @@ Basic flow if user teaches workflow:
 - User tells you step by step what to do. You try to execute the steps.
 - Iteratively write/update the skill files as you progress through the steps of the workflow
 
+### Skill creation location
+
+Create every new skill inside the `managed-skills/` directory.
+
+The resulting structure must be:
+
+managed-skills/<skill-name>/SKILL.md
+
+Do not create new skills elsewhere. When updating an existing skill, modify it in its current location.
+
 ---
 
 # Workflow methodology
