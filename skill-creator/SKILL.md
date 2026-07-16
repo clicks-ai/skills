@@ -204,7 +204,7 @@ Each step definition has:
 
 The optional `model` key sets which model a step's subagent runs on. It is set per step, so different steps in the same skill can run on different models — a cheap, fast model for a mechanical step, a stronger model for a judgment-heavy one.
 
-**Only set `model` when the user explicitly requests a specific model for a specific step.** This mirrors the rule about not adding steps unprompted: do not choose, add, or change a step's model on your own initiative. When the user asks for a model on a step, set exactly that model on exactly that step and leave every other step's `model` untouched. When the user says nothing about a step's model, omit the key entirely so the subagent uses the default.
+**Only set `model` when the user explicitly requests a specific model for a specific step.** This mirrors the rule about not adding steps unprompted: do not choose, add, or change a step's model on your own initiative. When the user asks for which models exist, provide him with the list of available models. When the user asks for a model on a step, set exactly that model on exactly that step and leave every other step's `model` untouched. When the user says nothing about a step's model, omit the key entirely so the subagent uses the default.
 
 The value must be one of the strings listed below, written verbatim — these are the only accepted values. The `-low` / `-medium` / `-high` / `-xhigh` suffix selects the reasoning-effort variant; the bare name (no suffix) is that model's default variant. If the user names a model that is not in this list, do not guess or substitute the closest match — ask them to pick one of these values.
 
