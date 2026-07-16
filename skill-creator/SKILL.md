@@ -225,11 +225,11 @@ Basic flow if user teaches workflow:
 
 ### Skill creation location
 
-Create every new skill inside the `managed-skills/` directory.
+Create every new skill inside the `/agent/skills/editable/managed-skills` directory.
 
 The resulting structure must be:
 
-managed-skills/<skill-name>/SKILL.md
+/agent/skills/editable/managed-skills/<skill-name>/SKILL.md
 
 Do not create new skills elsewhere. When updating an existing skill, modify it in its current location.
 
