@@ -229,7 +229,7 @@ Create every new skill inside the `/agent/skills/editable/managed-skills` direct
 
 The resulting structure must be:
 
-/agent/skills/editable/managed-skills/<skill-name>/SKILL.md
+/agent/skills/editable/managed-skills/skill-name/SKILL.md
 
 Do not create new skills elsewhere. When updating an existing skill, modify it in its current location.
 
