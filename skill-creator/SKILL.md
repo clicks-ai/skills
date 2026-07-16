@@ -183,6 +183,8 @@ steps:
 ---
 ```
 
+**Colon restriction:** Within the YAML frontmatter, the colon character (`:`) may be used only as the structural separator between a mapping key and its value, as shown in the example above. Never include a colon inside any key or value, including `description` text, step names, input names, input descriptions, or model names. Do not rely on quoting or escaping to include a colon. Rewrite the text to avoid it instead.
+
 Each step's instructions live in a standalone file next to the SKILL.md at `steps/<step_name>.md`. For the example above, the instructions for the `login` step belong in `steps/login.md`:
 
 ```
