@@ -372,7 +372,7 @@ The consumer is the model running the workflow. A section that exists only to he
 
 ## Batch / fan-out
 
-Structure a multi-item run as **intake normalization → ambiguity filtering → one primary-workflow run per item → aggregation**. Each child run acts as the orchestrator for its own item. Parallelize across items, never within one item unless the steps are genuinely independent. Point the batch path at the single intake and step definitions rather than restating them.
+Structure a multi-item run as **intake normalization → ambiguity filtering → one primary-workflow run per item as a delegated session → aggregation**. Each delegated session run acts as the orchestrator for its own item. Parallelize across items, never within one item unless the steps are genuinely independent. Point the batch path at the single intake and step definitions rather than restating them.
 
 ---
 
